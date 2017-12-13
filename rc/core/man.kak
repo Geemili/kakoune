@@ -17,7 +17,7 @@ hook -group man-highlight global WinSetOption filetype=man %{
 
 hook global WinSetOption filetype=man %{
     hook -group man-hooks window WinResize .* %{
-        man-impl %opt{manpage}
+        man-impl %val{bufname} %opt{manpage}
     }
 }
 
@@ -27,7 +27,9 @@ hook global WinSetOption filetype=(?!man).* %{
     remove-hooks window man-hooks
 }
 
-define-command -hidden -params 1..2 man-impl %{ %sh{
+define-command -hidden -params 2..3 man-impl %{ %sh{
+    buffer_name="$1"
+    shift
     manout=$(mktemp "${TMPDIR:-/tmp}"/kak-man-XXXXXX)
     colout=$(mktemp "${TMPDIR:-/tmp}"/kak-man-XXXXXX)
     MANWIDTH=${kak_window_width} man "$@" > $manout 2>/dev/null
@@ -36,7 +38,7 @@ define-command -hidden -params 1..2 man-impl %{ %sh{
     rm ${manout}
     if [ "${retval}" -eq 0 ]; then
         printf %s\\n "
-                edit -scratch '*man*'
+                edit -scratch '$buffer_name'
                 execute-keys '%|cat<space>${colout}<ret>gk'
                 nop %sh{rm ${colout}}
                 set-option buffer filetype man
@@ -49,22 +51,14 @@ define-command -hidden -params 1..2 man-impl %{ %sh{
 } }
 
 define-command -params ..1 \
-  -shell-completion %{
-    prefix=$(printf %s\\n "$1" | cut -c1-${kak_pos_in_token} 2>/dev/null)
-    for page in /usr/share/man/*/${prefix}*.[1-8]*; do
-        candidate=$(basename ${page%%.[1-8]*})
-        pagenum=$(printf %s\\n "$page" | sed 's,^.*\.\([1-8][^.]*\).*$,\1,')
-        case $candidate in
-            *\*) ;;
-            *) printf %s\\n "$candidate($pagenum)";;
-        esac
-    done
+  -shell-candidates %{
+      find /usr/share/man/ -name '*.[1-8]*' | sed 's,^.*/\(.*\)\.\([1-8][a-zA-Z]*\).*$,\1(\2),' 
   } \
   -docstring %{man [<page>]: manpage viewer wrapper
 If no argument is passed to the command, the selection will be used as page
 The page can be a word, or a word directly followed by a section number between parenthesis, e.g. kak(1)} \
     man %{ %sh{
-    subject=${@-$kak_selection}
+    subject=${1-$kak_selection}
 
     ## The completion suggestions display the page number, strip them if present
     case "${subject}" in
@@ -75,5 +69,5 @@ The page can be a word, or a word directly followed by a section number between 
             ;;
     esac
 
-    printf %s\\n "evaluate-commands -collapse-jumps -try-client %opt{docsclient} man-impl $pagenum $subject"
+    printf %s\\n "evaluate-commands -collapse-jumps -try-client %opt{docsclient} man-impl *man* $pagenum $subject"
 } }

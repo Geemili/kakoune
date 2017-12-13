@@ -143,7 +143,7 @@ const DisplayBuffer& Window::update_display_buffer(const Context& context)
     m_display_buffer.compute_range();
     BufferRange range{{0,0}, buffer().end_coord()};
     for (auto pass : { HighlightPass::Wrap, HighlightPass::Move, HighlightPass::Colorize })
-        m_builtin_highlighters.highlight(context, pass, m_display_buffer, range);
+        m_builtin_highlighters.highlight({context, pass, {}}, m_display_buffer, range);
 
     m_display_buffer.optimize();
 
@@ -200,7 +200,7 @@ DisplaySetup Window::compute_display_setup(const Context& context)
         false
     };
     for (auto pass : { HighlightPass::Move, HighlightPass::Wrap })
-        m_builtin_highlighters.compute_display_setup(context, pass, setup);
+        m_builtin_highlighters.compute_display_setup({context, pass, {}}, setup);
 
     // now ensure the cursor column is visible
     {
@@ -260,7 +260,8 @@ BufferCoord find_buffer_coord(const DisplayLine& line, const Buffer& buffer,
         }
         column -= len;
     }
-    return buffer.clamp(buffer.prev(range.end));
+    return range.end == BufferCoord{0,0} ?
+        range.end : buffer.prev(range.end);
 }
 }
 

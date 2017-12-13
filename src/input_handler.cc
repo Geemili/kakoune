@@ -194,10 +194,16 @@ public:
         context().hooks().run_hook("NormalBegin", "", context());
     }
 
-    void on_disabled(bool) override
+    void on_disabled(bool temporary) override
     {
         m_idle_timer.set_next_date(TimePoint::max());
         m_fs_check_timer.set_next_date(TimePoint::max());
+
+        if (not temporary and m_hooks_disabled)
+        {
+            context().hooks_disabled().unset();
+            m_hooks_disabled = false;
+        }
 
         context().hooks().run_hook("NormalEnd", "", context());
     }
@@ -666,24 +672,6 @@ private:
     bool       m_edit_filter = false;
     LineEditor m_filter_editor;
 };
-
-String common_prefix(ConstArrayView<String> strings)
-{
-    String res;
-    if (strings.empty())
-        return res;
-    res = strings[0];
-    for (auto& str : strings)
-    {
-        ByteCount len = std::min(res.length(), str.length());
-        ByteCount common_len = 0;
-        while (common_len < len and str[common_len] == res[common_len])
-            ++common_len;
-        if (common_len != res.length())
-            res = res.substr(0, common_len).str();
-    }
-    return res;
-}
 
 static Optional<Codepoint> get_raw_codepoint(Key key)
 {

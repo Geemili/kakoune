@@ -13,8 +13,7 @@ class Regex
 public:
     Regex() = default;
 
-    explicit Regex(StringView re, RegexCompileFlags flags = RegexCompileFlags::None,
-                   MatchDirection direction = MatchDirection::Forward);
+    explicit Regex(StringView re, RegexCompileFlags flags = RegexCompileFlags::None);
     bool empty() const { return m_str.empty(); }
     bool operator==(const Regex& other) const { return m_str == other.m_str; }
     bool operator!=(const Regex& other) const { return m_str != other.m_str; }
@@ -95,6 +94,8 @@ struct MatchResults
         m_values.swap(other.m_values);
     }
 
+    Vector<Iterator, MemoryDomain::Regex>& values() { return m_values; }
+
 private:
     Vector<Iterator, MemoryDomain::Regex> m_values;
 };
@@ -116,10 +117,8 @@ bool regex_match(It begin, It end, const Regex& re)
 template<typename It>
 bool regex_match(It begin, It end, MatchResults<It>& res, const Regex& re)
 {
-    Vector<It, MemoryDomain::Regex> captures;
-    const bool matched = regex_match(begin, end, captures, *re.impl());
-    res = matched ? MatchResults<It>{std::move(captures)} : MatchResults<It>{};
-    return matched;
+    res.values().clear();
+    return regex_match(begin, end, res.values(), *re.impl());
 }
 
 template<typename It>
@@ -133,16 +132,21 @@ template<typename It, MatchDirection direction = MatchDirection::Forward>
 bool regex_search(It begin, It end, MatchResults<It>& res, const Regex& re,
                   RegexExecFlags flags = RegexExecFlags::None)
 {
-    Vector<It, MemoryDomain::Regex> captures;
-    const bool matched = regex_search<It, direction>(begin, end, captures, *re.impl(), flags);
-    res = matched ? MatchResults<It>{std::move(captures)} : MatchResults<It>{};
-    return matched;
+    res.values().clear();
+    return regex_search<It, direction>(begin, end, res.values(), *re.impl(), flags);
+}
+
+template<typename It>
+bool backward_regex_search(It begin, It end, MatchResults<It>& res, const Regex& re,
+                  RegexExecFlags flags = RegexExecFlags::None)
+{
+    return regex_search<It, MatchDirection::Backward>(std::move(begin), std::move(end), res, re, flags);
 }
 
 String option_to_string(const Regex& re);
 void option_from_string(StringView str, Regex& re);
 
-template<typename Iterator>
+template<typename Iterator, MatchDirection direction = MatchDirection::Forward>
 struct RegexIterator
 {
     using ValueType = MatchResults<Iterator>;
@@ -150,7 +154,8 @@ struct RegexIterator
     RegexIterator() = default;
     RegexIterator(Iterator begin, Iterator end, const Regex& re,
                   RegexExecFlags flags = RegexExecFlags::None)
-        : m_regex{&re}, m_next_begin{begin}, m_begin{begin}, m_end{end}, m_flags{flags}
+        : m_regex{&re}, m_next_pos{direction == MatchDirection::Forward ? begin : end},
+          m_begin{begin}, m_end{end}, m_flags{flags}
     {
         next();
     }
@@ -170,7 +175,7 @@ struct RegexIterator
             return true;
 
         return lhs.m_regex == rhs.m_regex and
-               lhs.m_next_begin == rhs.m_next_begin and
+               lhs.m_next_pos == rhs.m_next_pos and
                lhs.m_end == rhs.m_end and
                lhs.m_flags == rhs.m_flags and
                lhs.m_results == rhs.m_results;
@@ -181,6 +186,9 @@ struct RegexIterator
         return not (lhs == rhs);
     }
 
+    RegexIterator begin() { return *this; }
+    RegexIterator end() { return {}; }
+
 private:
     void next()
     {
@@ -189,19 +197,31 @@ private:
         RegexExecFlags additional_flags{};
         if (m_results.size() and m_results[0].first == m_results[0].second)
             additional_flags |= RegexExecFlags::NotInitialNull;
-        if (m_begin != m_next_begin)
-            additional_flags |= RegexExecFlags::NotBeginOfSubject | RegexExecFlags::PrevAvailable;
 
-        if (not regex_search(m_next_begin, m_end, m_results, *m_regex,
-                             m_flags | additional_flags))
-            m_regex = nullptr;
+        if (direction == MatchDirection::Forward)
+        {
+            if (m_begin != m_next_pos)
+                additional_flags |= RegexExecFlags::NotBeginOfSubject | RegexExecFlags::PrevAvailable;
+
+            if (not regex_search(m_next_pos, m_end, m_results, *m_regex,
+                                 m_flags | additional_flags))
+                m_regex = nullptr;
+            else
+                m_next_pos = m_results[0].second;
+        }
         else
-            m_next_begin = m_results[0].second;
+        {
+            if (not backward_regex_search(m_begin, m_next_pos, m_results, *m_regex,
+                                          m_flags | additional_flags))
+                m_regex = nullptr;
+            else
+                m_next_pos = m_results[0].first;
+        }
     }
 
     const Regex* m_regex = nullptr;
     MatchResults<Iterator> m_results;
-    Iterator m_next_begin{};
+    Iterator m_next_pos{};
     const Iterator m_begin{};
     const Iterator m_end{};
     const RegexExecFlags m_flags = RegexExecFlags::None;

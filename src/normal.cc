@@ -693,6 +693,12 @@ void paste_all(Context& context, NormalParams params)
         selections = std::move(result);
 }
 
+constexpr RegexCompileFlags direction_flags(MatchDirection direction)
+{
+    return (direction == MatchDirection::Forward) ?
+        RegexCompileFlags::None : RegexCompileFlags::Backward | RegexCompileFlags::NoForward;
+}
+
 template<MatchDirection direction = MatchDirection::Forward, typename T>
 void regex_prompt(Context& context, String prompt, String default_regex, T func)
 {
@@ -725,7 +731,7 @@ void regex_prompt(Context& context, String prompt, String default_regex, T func)
                     context.push_jump();
 
                 if (not str.empty() or event == PromptEvent::Validate)
-                    func(Regex{str.empty() ? default_regex : str, RegexCompileFlags::None, direction}, event, context);
+                    func(Regex{str.empty() ? default_regex : str, direction_flags(direction)}, event, context);
             }
             catch (regex_error& err)
             {
@@ -760,7 +766,7 @@ void search(Context& context, NormalParams params)
     const int main_index = std::min(context.selections().main_index(), saved_reg.size()-1);
 
     regex_prompt<direction>(context, prompt.str(), saved_reg[main_index],
-                 [reg, count, saved_reg, main_index]
+                 [reg, count, saved_reg]
                  (Regex regex, PromptEvent event, Context& context) {
                      if (event == PromptEvent::Abort)
                      {
@@ -795,7 +801,7 @@ void search_next(Context& context, NormalParams params)
     StringView str = context.main_sel_register_value(reg);
     if (not str.empty())
     {
-        Regex regex{str, RegexCompileFlags::None, direction};
+        Regex regex{str, direction_flags(direction)};
         auto& selections = context.selections();
         bool main_wrapped = false;
         do {
@@ -871,7 +877,7 @@ void select_regex(Context& context, NormalParams params)
     const int main_index = std::min(context.selections().main_index(), saved_reg.size()-1);
 
     regex_prompt(context, std::move(prompt), saved_reg[main_index],
-                 [reg, capture, saved_reg, main_index](Regex ex, PromptEvent event, Context& context) {
+                 [reg, capture, saved_reg](Regex ex, PromptEvent event, Context& context) {
          if (event == PromptEvent::Abort)
          {
              RegisterManager::instance()[reg].set(context, saved_reg);
@@ -896,7 +902,7 @@ void split_regex(Context& context, NormalParams params)
     const int main_index = std::min(context.selections().main_index(), saved_reg.size()-1);
 
     regex_prompt(context, std::move(prompt), saved_reg[main_index],
-                 [reg, capture, saved_reg, main_index](Regex ex, PromptEvent event, Context& context) {
+                 [reg, capture, saved_reg](Regex ex, PromptEvent event, Context& context) {
          if (event == PromptEvent::Abort)
          {
              RegisterManager::instance()[reg].set(context, saved_reg);
@@ -1165,7 +1171,9 @@ void select_object(Context& context, NormalParams params)
         if (cp == 'c')
         {
             const bool info = show_auto_info_ifn(
-                "Enter object desc", "format: <open text>,<close text>",
+                "Enter object desc",
+                "format: <open regex>,<close regex>\n"
+                "        escape commas with '\\'",
                 AutoInfo::Command, context);
 
             context.input_handler().prompt(
@@ -1177,13 +1185,18 @@ void select_object(Context& context, NormalParams params)
                     if (event != PromptEvent::Validate)
                         return;
 
-                    Vector<String> params = split(cmdline, ',', '\\');
-                    if (params.size() != 2 or params[0].empty() or params[1].empty())
-                        throw runtime_error{"desc parsing failed, expected <open>,<close>"};
+                    struct error : runtime_error { error(size_t) : runtime_error{"desc parsing failed, expected <open>,<close>"} {} };
+
+                    auto params = cmdline | split<StringView>(',', '\\') |
+                        transform(unescape<',', '\\'>) | static_gather<error, 2>();
+
+                    if (params[0].empty() or params[1].empty())
+                        throw error{0};
 
                     select_and_set_last<mode>(
                         context, std::bind(select_surrounding, _1, _2,
-                                           params[0], params[1],
+                                           Regex{params[0], RegexCompileFlags::Backward},
+                                           Regex{params[1], RegexCompileFlags::Backward},
                                            count, flags));
                 });
             return;
@@ -1191,36 +1204,36 @@ void select_object(Context& context, NormalParams params)
 
         static constexpr struct SurroundingPair
         {
-            StringView opening;
-            StringView closing;
-            Codepoint name;
+            char opening;
+            char closing;
+            char name;
         } surrounding_pairs[] = {
-            { "(", ")", 'b' },
-            { "{", "}", 'B' },
-            { "[", "]", 'r' },
-            { "<", ">", 'a' },
-            { "\"", "\"", 'Q' },
-            { "'", "'", 'q' },
-            { "`", "`", 'g' },
+            { '(', ')', 'b' },
+            { '{', '}', 'B' },
+            { '[', ']', 'r' },
+            { '<', '>', 'a' },
+            { '"', '"', 'Q' },
+            { '\'', '\'', 'q' },
+            { '`', '`', 'g' },
         };
         auto pair_it = find_if(surrounding_pairs,
                                [cp](const SurroundingPair& s) {
-                                   return s.opening[0_char] == cp or
-                                          s.closing[0_char] == cp or
+                                   return s.opening == cp or s.closing == cp or
                                           (s.name != 0 and s.name == cp);
                                });
         if (pair_it != std::end(surrounding_pairs))
             return select_and_set_last<mode>(
                 context, std::bind(select_surrounding, _1, _2,
-                                   pair_it->opening, pair_it->closing,
+                                   Regex{format("\\Q{}", pair_it->opening), RegexCompileFlags::Backward},
+                                   Regex{format("\\Q{}", pair_it->closing), RegexCompileFlags::Backward},
                                    count, flags));
 
         if (is_punctuation(cp) or cp == '_')
         {
-            auto utf8cp = to_string(cp);
+            auto re = Regex{"\\Q" + to_string(cp), RegexCompileFlags::Backward};
             return select_and_set_last<mode>(
                 context, std::bind(select_surrounding, _1, _2,
-                                   utf8cp, utf8cp, count, flags));
+                                   re, re, count, flags));
         }
     }, get_title(),
     build_autoinfo_for_mapping(context, KeymapMode::Object,

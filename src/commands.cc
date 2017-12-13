@@ -249,11 +249,13 @@ void edit(const ParametersParser& parser, Context& context, const ShellContext&)
         buffer->flags() &= ~Buffer::Flags::NoHooks;
     }
 
+    Buffer* current_buffer = context.has_buffer() ? &context.buffer() : nullptr;
+
     const size_t param_count = parser.positional_count();
-    if (buffer != &context.buffer() or param_count > 1)
+    if (current_buffer and (buffer != current_buffer or param_count > 1))
         context.push_jump();
 
-    if (buffer != &context.buffer())
+    if (buffer != current_buffer)
         context.change_buffer(*buffer);
 
     if (param_count > 1 and not parser[1].empty())
@@ -387,7 +389,8 @@ static void ensure_all_buffers_are_saved()
     if (it == end)
         return;
 
-    String message = "modified buffers remaining: [";
+    String message = format("{} modified buffers remaining: [",
+                            std::count_if(it, end, is_modified));
     while (it != end)
     {
         message += (*it)->name();
@@ -751,7 +754,7 @@ static constexpr auto hooks = {
     "BufCreate", "BufNewFile", "BufOpenFile", "BufClose", "BufWritePost",
     "BufWritePre", "BufOpenFifo", "BufCloseFifo", "BufReadFifo", "BufSetOption",
     "InsertBegin", "InsertChar", "InsertDelete", "InsertEnd", "InsertIdle", "InsertKey",
-    "InsertMove", "InsertCompletionHide", "InsertCompletionShow",
+    "InsertMove", "InsertCompletionHide", "InsertCompletionShow", "InsertCompletionSelect",
     "KakBegin", "KakEnd", "FocusIn", "FocusOut", "RuntimeError", "PromptIdle",
     "NormalBegin", "NormalEnd", "NormalIdle", "NormalKey", "RawKey",
     "WinClose", "WinCreate", "WinDisplay", "WinResize", "WinSetOption",
@@ -931,8 +934,8 @@ void define_command(const ParametersParser& parser, Context& context, const Shel
                                                           ShellManager::Flags::WaitForStdout,
                                                           shell_context).first;
             CandidateList candidates;
-            for (auto& str : split(output, '\n', 0))
-                candidates.push_back(std::move(str));
+            for (auto&& candidate : output | split<StringView>('\n'))
+                candidates.push_back(candidate.str());
 
             return Completions{ 0_byte, pos_in_token, std::move(candidates) };
         };
@@ -1578,7 +1581,7 @@ void context_wrap(const ParametersParser& parser, Context& context, Func func)
                 context_wrap_for_buffer(*buffer);
         }
         else
-            for (auto& name : split(*bufnames, ','))
+            for (auto&& name : *bufnames | split<StringView>(','))
                 context_wrap_for_buffer(BufferManager::instance().get_buffer(name));
         return;
     }

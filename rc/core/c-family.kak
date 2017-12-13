@@ -39,8 +39,8 @@ define-command -hidden c-family-indent-on-newline %< evaluate-commands -draft -i
     >
     # remove previous empty lines resulting from the automatic indent
     try %< execute-keys -draft k <a-x> <a-k>^\h+$<ret> Hd >
-    # indent after an opening brace
-    try %< execute-keys -draft k <a-x> s\{\h*$<ret> j <a-gt> >
+    # indent after an opening brace or parenthesis at end of line
+    try %< execute-keys -draft k <a-x> s[{(]\h*$<ret> j <a-gt> >
     # indent after a label
     try %< execute-keys -draft k <a-x> s[a-zA-Z0-9_-]+:\h*$<ret> j <a-gt> >
     # indent after a statement not followed by an opening brace
@@ -49,7 +49,7 @@ define-command -hidden c-family-indent-on-newline %< evaluate-commands -draft -i
     # on a previous line if its followed by text on the same line
     try %< evaluate-commands -draft %<
         # Go to opening parenthesis and opening brace, then select the most nested one
-        try %< try %< execute-keys [bZ<a-\;>[B<a-z><gt> > catch %< execute-keys [B > >
+        try %< execute-keys [c [({],[)}] <ret> >
         # Validate selection and get first and last char
         execute-keys <a-k>\A[{(](\h*\S+)+\n<ret> <a-:><a-\;>L <a-S>
         # Remove eventual indent from new line

@@ -134,19 +134,14 @@ InsertCompletion complete_word(const SelectionList& sels, const OptionManager& o
     };
     Vector<RankedMatchAndBuffer> matches;
 
-    auto add_matches = [&](const Buffer& buf) {
-        auto& word_db = get_word_db(buf);
-        auto bufmatches = word_db.find_matching(prefix);
-        for (auto& m : bufmatches)
-            matches.push_back({ m, &buf });
-    };
-
-    add_matches(buffer);
+    auto& word_db = get_word_db(buffer);
+    for (auto& m : word_db.find_matching(prefix))
+        matches.push_back({ m, &buffer });
 
     // Remove words that are being edited
     for (auto& word_count : sel_word_counts)
     {
-        if (get_word_db(buffer).get_word_occurences(word_count.key) <= word_count.value)
+        if (word_db.get_word_occurences(word_count.key) <= word_count.value)
             unordered_erase(matches, word_count.key);
     }
 
@@ -156,7 +151,11 @@ InsertCompletion complete_word(const SelectionList& sels, const OptionManager& o
         {
             if (buf.get() == &buffer or buf->flags() & Buffer::Flags::Debug)
                 continue;
-            add_matches(*buf);
+            for (auto& m : get_word_db(*buf).find_matching(prefix) |
+                           // filter out words that are not considered words for the current buffer
+                           filter([&](auto& rm) { return std::all_of(rm.candidate().begin(), rm.candidate().end(),
+                                                                     is_word_pred); }))
+                matches.push_back({ m, buf.get() });
         }
     }
 
@@ -227,7 +226,8 @@ InsertCompletion complete_filename(const SelectionList& sels,
     InsertCompletion::CandidateList candidates;
     if (prefix.front() == '/' or prefix.front() == '~')
     {
-        for (auto& filename : Kakoune::complete_filename(prefix, Regex{}))
+        for (auto& filename : Kakoune::complete_filename(prefix,
+                                                         options["ignored_files"].get<Regex>()))
             candidates.push_back({ filename, "", filename });
     }
     else
@@ -236,7 +236,8 @@ InsertCompletion complete_filename(const SelectionList& sels,
         {
             if (not dir.empty() and dir.back() != '/')
                 dir += '/';
-            for (auto& filename : Kakoune::complete_filename(dir + prefix, Regex{}))
+            for (auto& filename : Kakoune::complete_filename(dir + prefix,
+                                                             options["ignored_files"].get<Regex>()))
             {
                 StringView candidate = filename.substr(dir.length());
                 candidates.push_back({ candidate.str(), "", candidate.str() });
@@ -425,6 +426,13 @@ void InsertCompleter::select(int offset, Vector<Key>& keystrokes)
         keystrokes.emplace_back(Key::Delete);
     for (auto& c : candidate.completion)
         keystrokes.emplace_back(c);
+
+    if (m_context.has_client())
+    {
+        const auto param = (m_current_candidate == m_completions.candidates.size() - 1) ?
+            StringView{} : candidate.completion;
+        m_context.hooks().run_hook("InsertCompletionSelect", param, m_context);
+    }
 }
 
 void InsertCompleter::update()
@@ -463,7 +471,7 @@ bool InsertCompleter::setup_ifn()
                 try_complete(complete_filename<true>))
                 return true;
             if (completer.mode == InsertCompleterDesc::Option and
-                try_complete([&,this](const SelectionList& sels, const OptionManager& options) {
+                try_complete([&](const SelectionList& sels, const OptionManager& options) {
                    return complete_option(sels, options, *completer.param);
                 }))
                 return true;

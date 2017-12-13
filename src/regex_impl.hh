@@ -23,6 +23,33 @@ enum class MatchDirection
     Backward
 };
 
+enum class CharacterType : unsigned char
+{
+    None                    = 0,
+    Whitespace              = 1 << 0,
+    HorizontalWhitespace    = 1 << 1,
+    Word                    = 1 << 2,
+    Digit                   = 1 << 3,
+    NotWhitespace           = 1 << 4,
+    NotHorizontalWhitespace = 1 << 5,
+    NotWord                 = 1 << 6,
+    NotDigit                = 1 << 7
+};
+constexpr bool with_bit_ops(Meta::Type<CharacterType>) { return true; }
+
+struct CharacterClass
+{
+    struct Range { Codepoint min, max; };
+
+    Vector<Range, MemoryDomain::Regex> ranges;
+    CharacterType ctypes = CharacterType::None;
+    bool negative = false;
+    bool ignore_case = false;
+};
+
+bool is_character_class(const CharacterClass& character_class, Codepoint cp);
+bool is_ctype(CharacterType ctype, Codepoint cp);
+
 struct CompiledRegex : RefCountable, UseMemoryDomain<MemoryDomain::Regex>
 {
     enum Op : char
@@ -32,7 +59,8 @@ struct CompiledRegex : RefCountable, UseMemoryDomain<MemoryDomain::Regex>
         Literal,
         Literal_IgnoreCase,
         AnyChar,
-        Matcher,
+        Class,
+        CharacterType,
         Jump,
         Split_PrioritizeParent,
         Split_PrioritizeChild,
@@ -68,30 +96,33 @@ struct CompiledRegex : RefCountable, UseMemoryDomain<MemoryDomain::Regex>
     explicit operator bool() const { return not instructions.empty(); }
 
     Vector<Instruction, MemoryDomain::Regex> instructions;
-    Vector<std::function<bool (Codepoint)>, MemoryDomain::Regex> matchers;
+    Vector<CharacterClass, MemoryDomain::Regex> character_classes;
     Vector<Codepoint, MemoryDomain::Regex> lookarounds;
-    MatchDirection direction;
-    size_t save_count;
+    uint32_t first_backward_inst; // -1 if no backward support, 0 if only backward, >0 if both forward and backward
+    uint32_t save_count;
 
-    struct StartChars
+    struct StartDesc
     {
         static constexpr size_t count = 256;
         static constexpr Codepoint other = 256;
         bool map[count+1];
     };
 
-    std::unique_ptr<StartChars> start_chars;
+    std::unique_ptr<StartDesc> forward_start_desc;
+    std::unique_ptr<StartDesc> backward_start_desc;
 };
 
 enum class RegexCompileFlags
 {
     None     = 0,
     NoSubs   = 1 << 0,
-    Optimize = 1 << 1
+    Optimize = 1 << 1,
+    Backward = 1 << 1,
+    NoForward = 1 << 2,
 };
 constexpr bool with_bit_ops(Meta::Type<RegexCompileFlags>) { return true; }
 
-CompiledRegex compile_regex(StringView re, RegexCompileFlags flags, MatchDirection direction = MatchDirection::Forward);
+CompiledRegex compile_regex(StringView re, RegexCompileFlags flags);
 
 enum class RegexExecFlags
 {
@@ -117,7 +148,8 @@ public:
     ThreadedRegexVM(const CompiledRegex& program)
       : m_program{program}
     {
-        kak_assert(m_program and direction == m_program.direction);
+        kak_assert((direction == MatchDirection::Forward and program.first_backward_inst != 0) or
+                   (direction == MatchDirection::Backward and program.first_backward_inst != -1));
     }
 
     ThreadedRegexVM(const ThreadedRegexVM&) = delete;
@@ -155,10 +187,30 @@ public:
 
         const bool search = (flags & RegexExecFlags::Search);
         Utf8It start{m_begin};
-        if (search)
-            to_next_start(start, m_end, m_program.start_chars.get());
+        const auto& start_desc = direction == MatchDirection::Forward ? m_program.forward_start_desc
+                                                                      : m_program.backward_start_desc;
+        if (start_desc)
+        {
+            if (search)
+            {
+                to_next_start(start, m_end, *start_desc);
+                if (start == m_end) // If start_desc is not null, it means we consume at least one char
+                    return false;
+            }
+            else if (start != m_end and
+                     not start_desc->map[std::min(*start, CompiledRegex::StartDesc::other)])
+                return false;
+        }
 
-        return exec_program(start, Thread{&m_program.instructions[search ? 0 : CompiledRegex::search_prefix_size], nullptr});
+        ConstArrayView<CompiledRegex::Instruction> instructions{m_program.instructions};
+        if (direction == MatchDirection::Forward)
+            instructions = instructions.subrange(0, m_program.first_backward_inst);
+        else
+            instructions = instructions.subrange(m_program.first_backward_inst);
+        if (not search)
+            instructions = instructions.subrange(CompiledRegex::search_prefix_size);
+
+        return exec_program(start, instructions);
     }
 
     ArrayView<const Iterator> captures() const
@@ -289,11 +341,16 @@ private:
                     thread.saves->pos[inst.param] = get_base(pos);
                     break;
                 }
-                case CompiledRegex::Matcher:
+                case CompiledRegex::Class:
                     if (pos == m_end)
                         return StepResult::Failed;
-                    return m_program.matchers[inst.param](*pos) ?
+                    return is_character_class(m_program.character_classes[inst.param], *pos) ?
                         StepResult::Consumed : StepResult::Failed;
+                case CompiledRegex::CharacterType:
+                    if (pos == m_end)
+                        return StepResult::Failed;
+                    return is_ctype((CharacterType)inst.param, *pos) ?
+                        StepResult::Consumed : StepResult::Failed;;
                 case CompiledRegex::LineStart:
                     if (not is_line_start(pos))
                         return StepResult::Failed;
@@ -354,10 +411,13 @@ private:
         return StepResult::Failed;
     }
 
-    bool exec_program(Utf8It pos, Thread init_thread)
+    bool exec_program(Utf8It pos, ConstArrayView<CompiledRegex::Instruction> instructions)
     {
         ExecState state;
-        state.current_threads.push_back(init_thread);
+        state.current_threads.push_back({instructions.begin(), nullptr});
+
+        const auto& start_desc = direction == MatchDirection::Forward ? m_program.forward_start_desc
+                                                                      : m_program.backward_start_desc;
 
         bool found_match = false;
         while (true) // Iterate on all codepoints and once at the end
@@ -365,7 +425,7 @@ private:
             if (++state.step == 0)
             {
                 // We wrapped, avoid potential collision on inst.last_step by resetting them
-                for (auto& inst : m_program.instructions)
+                for (auto& inst : instructions)
                     inst.last_step = 0;
                 state.step = 1; // step 0 is never valid
             }
@@ -427,19 +487,16 @@ private:
             std::reverse(state.current_threads.begin(), state.current_threads.end());
             ++pos;
 
-            if (find_next_start)
-                to_next_start(pos, m_end, m_program.start_chars.get());
+            if (find_next_start and start_desc)
+                to_next_start(pos, m_end, *start_desc);
         }
     }
 
     void to_next_start(Utf8It& start, const Utf8It& end,
-                       const CompiledRegex::StartChars* start_chars)
+                       const CompiledRegex::StartDesc& start_desc)
     {
-        if (not start_chars)
-            return;
-
         while (start != end and *start >= 0 and
-               not start_chars->map[std::min(*start, CompiledRegex::StartChars::other)])
+               not start_desc.map[std::min(*start, CompiledRegex::StartDesc::other)])
             ++start;
     }
 
@@ -457,9 +514,14 @@ private:
             const Codepoint ref = *it;
             if (ref == 0xF000)
             {} // any character matches
-            else if (ref > 0xF0000 and ref <= 0xFFFFD)
+            else if (ref > 0xF0000 and ref < 0xF8000)
             {
-                if (not m_program.matchers[ref - 0xF0001](cp))
+                if (not is_character_class(m_program.character_classes[ref - 0xF0001], cp))
+                    return false;
+            }
+            else if (ref >= 0xF8000 and ref <= 0xFFFFD)
+            {
+                if (not is_ctype((CharacterType)(ref & 0xFF), cp))
                     return false;
             }
             else if (ref != cp)
